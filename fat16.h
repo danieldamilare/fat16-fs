@@ -31,16 +31,16 @@ class DiskImg{
         DiskImg(const DiskImg& other);
         DiskImg& operator=(const DiskImg&) = delete;
         SectorInfo read_sector(size_t sector, size_t num=1, size_t part_start = 0);
-        DiskStatus write_sector(int sector, SectorInfo& sect,  int part_start = 0);
+        DiskStatus write_sector(size_t sector, SectorInfo& sect,  size_t part_start = 0);
 
-        DiskStatus create_partition(int size, size_t& part_start);
+        DiskStatus create_partition(size_t size, size_t& part_start);
         std::vector<PartInfo> list_partitions();
     ~DiskImg();
     private:
         std::byte * img;
         std::byte * base;
-        int size;
-        int sector_size = 512;
+        size_t size;
+        size_t sector_size = 512;
 }; /* always leave first 512 bytes to simulate mbr partitioning table */
 
 #pragma pack(push, 1)
@@ -99,13 +99,15 @@ class Fat16Fs{
         std::string newb();
     private:
         struct FatBootSector bpb;
-        std::unordered_map<int, struct FCB> open_files;
+        std::unordered_map<int, struct OpenFile> open_files;
         int allocate_cluster();
         int free_cluster_chain(uint16_t cluster_start);
         int cluster_to_sector();
         DiskStatus format_fat_table();
         DiskStatus write_fat16_boot(size_t bytes);
+        DiskStatus format_dir_entries();
         DiskImg& Disk;
+        size_t sector_per_cluster;
         size_t data_area_start;
         size_t data_area_sectors;
         size_t total_sector;
