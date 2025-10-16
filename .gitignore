@@ -1,0 +1,7 @@
+*.swo
+*.swp
+*.bin
+*.o
+fat16
+*.out
+
