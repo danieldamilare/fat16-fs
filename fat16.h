@@ -33,7 +33,7 @@ class DiskImg{
         SectorInfo read_sector(size_t sector, size_t num=1, size_t part_start = 0);
         DiskStatus write_sector(int sector, SectorInfo& sect,  int part_start = 0);
 
-        DiskStatus create_partition(int size, int& part_start);
+        DiskStatus create_partition(int size, size_t& part_start);
         std::vector<PartInfo> list_partitions();
     ~DiskImg();
     private:
@@ -43,7 +43,7 @@ class DiskImg{
         int sector_size = 512;
 }; /* always leave first 512 bytes to simulate mbr partitioning table */
 
-
+#pragma pack(push, 1)
 struct FatBootSector{
     uint8_t jmp[3];
     uint8_t oem[8];
@@ -68,6 +68,7 @@ struct FatBootSector{
     uint8_t bootcode[448];
     uint8_t signature[2];
 };
+#pragma pack(pop)
 
 struct OpenFile {
     uint8_t drive_num;
@@ -102,11 +103,18 @@ class Fat16Fs{
         int allocate_cluster();
         int free_cluster_chain(uint16_t cluster_start);
         int cluster_to_sector();
+        DiskStatus format_fat_table();
+        DiskStatus write_fat16_boot(size_t bytes);
         DiskImg& Disk;
-        int data_area_start;
-        int root_dir_start;
-        int fat_table_start;
-        int part_start;
+        size_t data_area_start;
+        size_t data_area_sectors;
+        size_t total_sector;
+        size_t total_cluster;
+        size_t root_dir_sector_start;
+        size_t root_dir_sectors;
+        size_t fat_table_sector_start;
+        size_t fat_sectors;
+        size_t part_start;
         std::string cwd;
 };
 
