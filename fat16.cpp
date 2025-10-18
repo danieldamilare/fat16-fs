@@ -37,9 +37,10 @@ constexpr uint64_t arr_to_num(const uint8_t (&arr)[N]) {
     return num;
 }
 
-DiskImg::DiskImg(int size){
+DiskImg::DiskImg(size_t size){
     this->size = ((size + (sector_size -1))/sector_size) * sector_size;
-    base = new std::byte[this->size]();
+    printf("In disk constructor size: %lu", size);
+    base = new std::byte[this->size];
     img = base + 512; //leave the first 512 for partitioning
 }
 
@@ -52,7 +53,7 @@ SectorInfo DiskImg::read_sector(size_t sector, size_t num, size_t part_start){
     size_t to_start = part_start + sector * sector_size;
     size_t to_read = num * sector_size;
 
-    if (to_start + to_read > size) return {};
+    if (to_start + to_read > (size - 512)) return {};
     SectorInfo sect;
     sect.resize(to_read);
 
@@ -60,28 +61,54 @@ SectorInfo DiskImg::read_sector(size_t sector, size_t num, size_t part_start){
     return sect;
 }
 
+
+DiskStatus DiskImg::save_sectors(std::string filename, size_t sector,
+        size_t sector_count, size_t part_start){
+    size_t write_size = sector_count * sector_size;
+    size_t to_start = sector * sector_size;
+
+    FILE * f = fopen(filename.c_str(), "wb");
+    if  (f == NULL){
+        std::cerr << "Can open file to save sectors\n";
+        return DiskStatus::UNKNOWN_ERROR;
+    }
+
+    if(auto size = fwrite(img+to_start, 1, write_size, f); size != write_size){
+        std::cerr << "Error writing sector " << sector << " with size: " << write_size << " to file: " << filename << "\n";
+        return DiskStatus::UNKNOWN_ERROR;
+    }
+    fclose(f);
+    return DiskStatus::OK;
+}
+
+
 DiskStatus DiskImg::write_sector(size_t sector, SectorInfo& sect, size_t part_start){
     if (sect.empty()) return DiskStatus::BAD_SIZE;
     size_t to_start = part_start + (sector * byte_per_sector);
     size_t to_write = sect.size();
-    if (to_start + to_write > size) return DiskStatus::OUT_OF_RANGE;
+    if (to_start + to_write > (size - 512)) return DiskStatus::OUT_OF_RANGE;
     std::copy_n(sect.data(), to_write, img+to_start);
     return DiskStatus::OK;
 }
 
-DiskStatus DiskImg::create_partition(size_t size, size_t& part_size){
+DiskStatus DiskImg::create_partition(size_t size, size_t& part_start){
     //write to mbr partition table
-    return DiskStatus::UNKNOWN_ERROR;
+    // place holder currently to test the function
+    part_start = begin_partition_sector * sector_size;
+    return DiskStatus::OK;
 }
 
 Fat16Fs::Fat16Fs(DiskImg& disk): Disk{disk}{}
 
 uint8_t get_sector_per_cluster(size_t bytes){
     std::vector<std::pair<size_t, size_t>> size_range {
-        {256 * 1024L * 1024, 8},
-        {512 * 1024L * 1024, 16},
-        {1024 * 1024L * 1024, 32},
-        {2 * 1024 * 1024L * 1024, 64}
+        {3 * 1024LL * 1024LL, 1},
+        {64 * 1024LL * 1024LL, 2},
+        {128LL * 1024LL * 1024LL, 4},
+        {256LL * 1024LL * 1024LL, 8},
+        {512LL * 1024LL * 1024LL, 16},
+        {1024LL * 1024LL * 1024LL, 32},
+        {2LL * 1024LL * 1024LL * 1024LL, 64}
     };
     auto spc = 4;
     for (auto [file_size, sector_size]: size_range){
@@ -105,10 +132,13 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
     uint8_t spc = get_sector_per_cluster(bytes);
     // set the total_sector
    
+    printf("Before allocating boot file\n");
     std::vector<std::byte> boot_file(512, std::byte{0x00});
+    printf("After allocating boot file\n");
 
     total_sector = bytes/byte_per_sector;
     FatBootSector * BootSect =reinterpret_cast<FatBootSector *>(boot_file.data() );
+    printf("Reinterpeted Boot sector\n");
     uint8_t num_fat = 2;
     uint8_t less_sector[2] = {0, 0};
     uint8_t higher_sector[4] = {0, 0, 0, 0};
@@ -124,9 +154,16 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
     }
 
     uint8_t media_descriptor = 0xfa; // ramdisk
-    auto cluster_est = (total_sector - (num_root_entries * root_entrysz + byte_per_sector * reserved_sector))/spc; // try to estimate cluster
+    auto root_sec = (num_root_entries * root_entrysz)/ byte_per_sector;
+    auto cluster_est = (total_sector - root_sec - reserved_sector)/spc; // try to estimate cluster
+    if (cluster_est >= total_sector){//overflow!!!
+            std::cerr << cluster_est << "\n";
+            std::cerr << "Overflow error\n";
+            return DiskStatus::OUT_OF_RANGE;
+    }
 
     uint16_t fat_sector = ((cluster_est * 2) + (byte_per_sector -1))/byte_per_sector;
+    
     uint8_t num_sector_per_fat[2] = {static_cast<uint8_t>(fat_sector & 0xff), 
                                      static_cast<uint8_t>((fat_sector >> 8)&0xff )};
     uint8_t num_sect_per_track[2] = {0, 0};
@@ -154,6 +191,7 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
     std::copy_n(signature, sizeof(signature), BootSect->signature);
     std::copy_n(rsv_sector, 2, BootSect->rsv_sector);
     std::copy_n(bps, sizeof(bps), BootSect->num_rootdir); // root dir is 512
+    printf("All copying done");
 
     BootSect->spc = spc;
     BootSect->num_fat = num_fat;
@@ -161,8 +199,7 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
     BootSect->drive_num = drive_num;
     BootSect->boot_sig = 0x29;
 
-    std::copy_n(BootSect, 512, &bpb);
-
+    bpb = *BootSect;
     if(auto status =Disk.write_sector(0, boot_file, part_start); status != DiskStatus::OK){
         std::cerr << "Error formating the Fat drive";
         return status;
@@ -206,9 +243,11 @@ DiskStatus Fat16Fs::format_dir_entries(){
 }
 
 DiskStatus Fat16Fs::fat_format(long long bytes){
-    if (bytes > (2LL * 1024LL * 1024LL * 1024LL)){
-        std::cerr << "Error: Fat16 support at most 2gb";
-        return DiskStatus::PARTITION_FAIL;
+    if (bytes > (2LL * 1024LL * 1024LL * 1024LL) || 
+            bytes <  2LL * 1024LL * 1024LL){
+        std::cerr << "Bytes: "<< bytes << "\n";
+        std::cerr << "Attempting to create a too small or a too large filesystem";
+        return DiskStatus::BAD_SIZE;
     }
 
     bytes = byte_per_sector * (bytes +(byte_per_sector -1))/byte_per_sector;
@@ -235,6 +274,21 @@ DiskStatus Fat16Fs::fat_format(long long bytes){
     return DiskStatus::OK;
 }
 
-int main(){
+Fat16Fs::~Fat16Fs(){
+}
 
+
+
+DiskStatus Fat16Fs::fat_write(std::string filename){
+   return  Disk.save_sectors(filename,
+            0, total_sector, part_start);
+}
+
+int main(){
+    printf("In main\n");
+    DiskImg tempdisk{3LL * 1024LL * 1024LL};
+    Fat16Fs myfat (tempdisk);
+    printf("Formatting...\n");
+    myfat.fat_format(2LL * 1024LL * 1024LL);
+    myfat.fat_write(std::string{"testfat.bin"});
 }

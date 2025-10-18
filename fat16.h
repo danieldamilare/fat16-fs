@@ -27,20 +27,27 @@ struct PartInfo{
 
 class DiskImg{
     public:
-        DiskImg(int size);
-        DiskImg(const DiskImg& other);
+        DiskImg(size_t size);
+        DiskImg(const DiskImg& other) = delete;
         DiskImg& operator=(const DiskImg&) = delete;
+
         SectorInfo read_sector(size_t sector, size_t num=1, size_t part_start = 0);
         DiskStatus write_sector(size_t sector, SectorInfo& sect,  size_t part_start = 0);
+        DiskStatus save_partition(size_t part_start);
+        DiskStatus save_disk();
+        DiskStatus save_sectors(std::string filename, size_t sector, size_t sector_count=1, size_t part_start = 0);
 
         DiskStatus create_partition(size_t size, size_t& part_start);
+
         std::vector<PartInfo> list_partitions();
     ~DiskImg();
+
     private:
         std::byte * img;
         std::byte * base;
         size_t size;
         size_t sector_size = 512;
+        size_t begin_partition_sector = 0;
 }; /* always leave first 512 bytes to simulate mbr partitioning table */
 
 #pragma pack(push, 1)
@@ -95,8 +102,9 @@ class Fat16Fs{
         bool fat_mkdir(std::string& dirname);
         bool fat_chdir(std::string);
         bool fat_close(int fd);
+        DiskStatus fat_write(std::string filename);
         std::string get_cwd();
-        std::string newb();
+
     private:
         struct FatBootSector bpb;
         std::unordered_map<int, struct OpenFile> open_files;
