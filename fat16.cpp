@@ -1,3 +1,4 @@
+#include <cassert>
 #include <iostream>
 #include "fat16.h"
 #include <algorithm>
@@ -11,22 +12,7 @@ inline bool is_little_endian() noexcept {
     return *reinterpret_cast<uint8_t*>(&x) == 1;
 }
 
-template<typename T>
-constexpr auto  to_le_array(T num){
-    std::array<T, sizeof(T)> arr{};
-    int tsize = sizeof(T);
-    for (int i = 0; i < sizeof(T); i++){
-        if(is_little_endian()){
-            arr[i] = static_cast<uint8_t>((num >>(i * 8)) & 0xff);
-        }
-        else{
-            arr[tsize -i - 1] = static_cast<uint8_t>((num >>(i * 8)) & 0xff);
-        }
-    }
-    return arr;
-}
-
-template <size_t N>
+template<size_t N>
 constexpr uint64_t arr_to_num(const uint8_t (&arr)[N]) {
     size_t n = (N > 8) ? 8 : N; // only up to 64 bits
     uint64_t num = 0;
@@ -35,6 +21,14 @@ constexpr uint64_t arr_to_num(const uint8_t (&arr)[N]) {
         num |= static_cast<uint64_t>(arr[i]) << (8 * i);
 
     return num;
+}
+
+template<typename T>
+constexpr void write_le(uint8_t * dest, T num){
+    auto tsize = sizeof(T);
+    for (size_t i = 0; i < tsize; i++){
+            dest[i] = static_cast<uint8_t>((num >>(i * 8)) & 0xff);
+        }
 }
 
 DiskImg::DiskImg(size_t size){
@@ -102,7 +96,7 @@ Fat16Fs::Fat16Fs(DiskImg& disk): Disk{disk}{}
 
 uint8_t get_sector_per_cluster(size_t bytes){
     std::vector<std::pair<size_t, size_t>> size_range {
-        {3 * 1024LL * 1024LL, 1},
+        {32 * 1024LL * 1024LL, 1},
         {64 * 1024LL * 1024LL, 2},
         {128LL * 1024LL * 1024LL, 4},
         {256LL * 1024LL * 1024LL, 8},
@@ -121,14 +115,11 @@ uint8_t get_sector_per_cluster(size_t bytes){
 }
 
 DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
-    constexpr auto num_root_entries = 512;
-    constexpr auto root_entrysz = 32;
-    constexpr auto reserved_sector = 1;
-    uint8_t jmp[3] = {0xeb, 0x3f, 0x90};
-    uint8_t oem[8] = "MYDOSNG";
-    oem[7] = ' ';
+    constexpr uint16_t num_root_entries = 512;
+    constexpr uint8_t root_entrysz = 32;
+    constexpr uint16_t reserved_sector = 1;
+    constexpr uint16_t bps = 512;
 
-    uint8_t bps[2] = {0x00, 0x02}; // 512 (0x200) bytes per sector
     uint8_t spc = get_sector_per_cluster(bytes);
     // set the total_sector
    
@@ -140,57 +131,49 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
     FatBootSector * BootSect =reinterpret_cast<FatBootSector *>(boot_file.data() );
     printf("Reinterpeted Boot sector\n");
     uint8_t num_fat = 2;
-    uint8_t less_sector[2] = {0, 0};
-    uint8_t higher_sector[4] = {0, 0, 0, 0};
-
-    if (total_sector < (1 << 16)){
-        less_sector[0] = (total_sector & 0xff);
-        less_sector[1] = ((total_sector >> 8) & 0xff);
-    } else{
-        higher_sector[0] = (total_sector & 0xff);
-        higher_sector[1] = ((total_sector >> 8) & 0xff);
-        higher_sector[2] = ((total_sector >> 16) & 0xff);
-        higher_sector[3] = ((total_sector >> 24) & 0xff);
-    }
-
+    
     uint8_t media_descriptor = 0xfa; // ramdisk
     auto root_sec = (num_root_entries * root_entrysz)/ byte_per_sector;
     auto cluster_est = (total_sector - root_sec - reserved_sector)/spc; // try to estimate cluster
-    if (cluster_est >= total_sector){//overflow!!!
+    uint16_t fat_sector = ((cluster_est * 2) + (byte_per_sector -1))/byte_per_sector;
+    auto actual_cluster = (total_sector - root_sec - (fat_sector * 2) -reserved_sector)/spc;
+    if (actual_cluster >= (1 <<16)){//overflow!!!
             std::cerr << cluster_est << "\n";
-            std::cerr << "Overflow error\n";
+            std::cerr << "Cluster too large for file system";
             return DiskStatus::OUT_OF_RANGE;
     }
+    if (actual_cluster < 4085){
+        std::cerr << "Too few cluster would be FAT12: " << cluster_est << "\n";
+    }
 
-    uint16_t fat_sector = ((cluster_est * 2) + (byte_per_sector -1))/byte_per_sector;
-    
-    uint8_t num_sector_per_fat[2] = {static_cast<uint8_t>(fat_sector & 0xff), 
-                                     static_cast<uint8_t>((fat_sector >> 8)&0xff )};
-    uint8_t num_sect_per_track[2] = {0, 0};
-    uint8_t num_head[2] = {0, 0};
-    uint8_t num_hidden_sector[4] = {0, 0, 0, 0};
-    uint8_t label[11] = {'N', 'O', ' ', 'N', 'A', 'M', 'E', ' ', ' ', ' ', ' '};
-    uint8_t sys_ident[8] = {'F', 'A', 'T', '1', '6', ' ', ' ', ' '};
-    uint8_t drive_num = 0x80;
-    uint8_t signature[2] = {0x55, 0xaa};
+    fat_sector = ((actual_cluster * 2) + (byte_per_sector -1))/byte_per_sector;
+    write_le(BootSect->num_sect_fat, static_cast<uint16_t>(fat_sector));
 
-    uint8_t rsv_sector[2] = {0x01, 0x00};
+    uint8_t jmp[3] = {0xeb, 0x3f, 0x90};
     std::copy_n(jmp, sizeof(jmp), BootSect->jmp);
-    std::copy_n(oem, sizeof(oem), BootSect->oem);
-    std::copy_n(bps, sizeof(bps), BootSect->bps);
-    std::copy_n(less_sector, sizeof(less_sector), BootSect->num_sect);
-    std::copy_n(higher_sector, sizeof(higher_sector), BootSect->sector_count);
+    write_le(BootSect->num_hidden_sector, static_cast<uint32_t>(0));
+    uint8_t label[11] = {'N', 'O', ' ', 'N', 'A', 'M', 'E', ' ', ' ', ' ', ' '};
     std::copy_n(label, sizeof(label), BootSect->label);
-    std::copy_n(num_head, sizeof(num_head), BootSect->num_head);
-    std::copy_n(num_sector_per_fat, sizeof(num_sector_per_fat), BootSect->num_sect_fat);
+    uint8_t sys_ident[8] = {'F', 'A', 'T', '1', '6', ' ', ' ', ' '};
     std::copy_n(sys_ident, sizeof(sys_ident), BootSect->sys_ident);
-    std::copy_n(num_sect_per_track, sizeof(num_sect_per_track),
-            BootSect->num_sect_per_track);
-    std::copy_n(num_hidden_sector, sizeof(num_hidden_sector), 
-            BootSect->num_hidden_sector);
-    std::copy_n(signature, sizeof(signature), BootSect->signature);
-    std::copy_n(rsv_sector, 2, BootSect->rsv_sector);
-    std::copy_n(bps, sizeof(bps), BootSect->num_rootdir); // root dir is 512
+    uint8_t drive_num = 0x80;
+    BootSect->signature[0] = 0x55; BootSect->signature[1] = 0xaa;
+    write_le(BootSect->num_sect_per_track, static_cast<uint16_t>(63));
+    write_le(BootSect->num_head, static_cast<uint16_t>(255));
+    write_le(BootSect->rsv_sector, static_cast<uint16_t>(reserved_sector));
+    write_le(BootSect->bps, static_cast<uint16_t>(bps));
+
+    if(total_sector < (1 << 16)){
+        write_le(BootSect->num_sect, static_cast<uint16_t> (total_sector));
+        write_le(BootSect->sector_count, static_cast<uint32_t>(0));
+    } else{
+        write_le(BootSect->num_sect, static_cast<uint16_t> (0));
+        write_le(BootSect->sector_count, static_cast<uint32_t>(total_sector));
+    }
+    write_le(BootSect->num_rootdir, static_cast<uint16_t>(num_root_entries));
+    uint8_t oem[8] = "MYDOSNG";
+    oem[7] = ' ';
+    std::copy_n(oem, sizeof(oem), BootSect->oem);
     printf("All copying done");
 
     BootSect->spc = spc;
@@ -204,7 +187,7 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
         std::cerr << "Error formating the Fat drive";
         return status;
     }
-   fat_table_sector_start = arr_to_num(bpb.rsv_sector);
+    fat_table_sector_start = arr_to_num(bpb.rsv_sector);
     fat_sectors = arr_to_num(bpb.num_sect_fat);
     root_dir_sector_start = fat_table_sector_start + fat_sectors * bpb.num_fat;
     root_dir_sectors = (arr_to_num(bpb.num_rootdir) * 32 + byte_per_sector-1)/byte_per_sector;
@@ -219,6 +202,7 @@ DiskStatus Fat16Fs::write_fat16_boot(size_t bytes){
 DiskStatus Fat16Fs::format_fat_table(){
     auto fat_table = Disk.read_sector(fat_table_sector_start, fat_sectors, part_start);
     if (fat_table.empty()){
+        std::cerr << "fat table read empty\n";
         return DiskStatus::READ_FAIL;
     }
 
@@ -250,7 +234,7 @@ DiskStatus Fat16Fs::fat_format(long long bytes){
         return DiskStatus::BAD_SIZE;
     }
 
-    bytes = byte_per_sector * (bytes +(byte_per_sector -1))/byte_per_sector;
+    bytes = byte_per_sector * ((bytes +(byte_per_sector -1))/byte_per_sector);
 
     if(auto status = Disk.create_partition(bytes, part_start);
             status != DiskStatus::OK){
@@ -278,7 +262,6 @@ Fat16Fs::~Fat16Fs(){
 }
 
 
-
 DiskStatus Fat16Fs::fat_write(std::string filename){
    return  Disk.save_sectors(filename,
             0, total_sector, part_start);
@@ -286,9 +269,9 @@ DiskStatus Fat16Fs::fat_write(std::string filename){
 
 int main(){
     printf("In main\n");
-    DiskImg tempdisk{3LL * 1024LL * 1024LL};
+    DiskImg tempdisk{4LL * 1024LL * 1024LL};
     Fat16Fs myfat (tempdisk);
     printf("Formatting...\n");
-    myfat.fat_format(2LL * 1024LL * 1024LL);
+    myfat.fat_format(3LL * 1024LL * 1024LL);
     myfat.fat_write(std::string{"testfat.bin"});
 }
